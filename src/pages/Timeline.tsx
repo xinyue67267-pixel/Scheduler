@@ -19,7 +19,6 @@ import { zhCN } from 'date-fns/locale';
 import {
   Search,
   Download,
-  ChevronDown,
   ChevronRight,
   ZoomIn,
   ZoomOut,
@@ -86,17 +85,16 @@ export default function Timeline() {
 
   // --- 1. Coordinate System ---
   const timeUnits = useMemo(() => {
-    // 统一使用周日作为周起始日 (weekStartsOn: 0)，以满足用户 3.1 属于下周的逻辑
     const start = viewMode === 'day' 
       ? addDays(today, -30) 
       : viewMode === 'week' 
-      ? startOfWeek(addWeeks(today, -12), { weekStartsOn: 0 })
+      ? startOfWeek(addWeeks(today, -12), { weekStartsOn: 1 })
       : startOfMonth(addMonths(today, -6));
     
     const end = addMonths(start, 24);
     
     if (viewMode === 'day') return eachDayOfInterval({ start, end });
-    if (viewMode === 'week') return eachWeekOfInterval({ start, end }, { weekStartsOn: 0 });
+    if (viewMode === 'week') return eachWeekOfInterval({ start, end }, { weekStartsOn: 1 });
     return eachMonthOfInterval({ start, end });
   }, [viewMode, today]);
 
@@ -278,11 +276,11 @@ export default function Timeline() {
               {viewMode === 'day'
                 ? format(unit, 'MM/dd')
                 : viewMode === 'week'
-                ? `${format(addDays(unit, 1), 'MM/dd')}-${format(addDays(unit, 7), 'MM/dd')}`
+                ? `${format(unit, 'MM/dd')}-${format(addDays(unit, 6), 'MM/dd')}`
                 : format(unit, 'yyyy/MM')}
             </span>
             <span className="text-[10px] text-gray-400 mt-0.5">
-              {viewMode === 'day' ? format(unit, 'EEE', { locale: zhCN }) : format(addDays(unit, 1), 'MM/dd')}
+              {viewMode === 'day' ? format(unit, 'EEE', { locale: zhCN }) : format(unit, 'MM/dd')}
             </span>
           </div>
         );
