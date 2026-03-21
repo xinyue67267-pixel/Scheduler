@@ -83,6 +83,8 @@ export default function Timeline() {
   const [dragStartX, setDragStartX] = useState(0);
   const [dragStartDate, setDragStartDate] = useState<string | null>(null);
   const [dragStartEndDate, setDragStartEndDate] = useState<string | null>(null);
+  const [previewDates, setPreviewDates] = useState<{ startDate: string; endDate: string } | null>(null);
+  const lastClientXRef = useRef<number | null>(null);
   
   const today = new Date();
 
@@ -319,27 +321,25 @@ export default function Timeline() {
     setDragStartX(e.clientX);
     setDragStartDate(startDate || null);
     setDragStartEndDate(endDate || null);
+    setPreviewDates(null);
+    lastClientXRef.current = e.clientX;
   };
 
   const handleMouseMove = useCallback(
     (e: MouseEvent) => {
       if (!draggingPhase || !dragStartDate) return;
 
-      const deltaX = e.clientX - dragStartX;
+      const currentX = e.clientX;
+      const lastX = lastClientXRef.current ?? dragStartX;
+      const deltaX = currentX - lastX;
       const daysDelta = Math.round(deltaX / unitWidth);
-      
-      const { projectId, phaseId, type } = draggingPhase;
-      const project = projects.find(p => p.id === projectId);
-      if (!project) return;
 
-      const phaseIndex = project.phases.findIndex(p => p.id === phaseId);
-      if (phaseIndex === -1) return;
+      if (daysDelta === 0) return;
+      lastClientXRef.current = currentX;
 
-      const phase = project.phases[phaseIndex];
-      if (!phase.startDate || !phase.endDate) return;
-
-      const startDate = parseISO(phase.startDate);
-      const endDate = parseISO(phase.endDate);
+      const { phaseId, type } = draggingPhase;
+      const startDate = parseISO(dragStartDate);
+      const endDate = dragStartEndDate ? parseISO(dragStartEndDate) : startDate;
 
       let newStartDate: Date;
       let newEndDate: Date;
@@ -361,37 +361,52 @@ export default function Timeline() {
         newStartDate = startDate;
       }
 
-      updatePhase(projectId, phaseId, {
+      setPreviewDates({
         startDate: format(newStartDate, 'yyyy-MM-dd'),
         endDate: format(newEndDate, 'yyyy-MM-dd'),
       });
-
-      const dependentPhases = project.phases.filter(
-        (p, i) => i > phaseIndex && p.dependencies?.some(d => d.phaseId === phaseId)
-      );
-
-      let currentEndDate = newEndDate;
-      dependentPhases.forEach((depPhase, idx) => {
-        const depPhaseIndex = project.phases.findIndex(p => p.id === depPhase.id);
-        const newPhaseStart = calculateNewPhaseStart(depPhase, project.phases, currentEndDate, holidays);
-        const newPhaseEnd = calculatePhaseEndDate(newPhaseStart, depPhase.manDays, holidays);
-        
-        updatePhase(projectId, depPhase.id, {
-          startDate: format(newPhaseStart, 'yyyy-MM-dd'),
-          endDate: format(newPhaseEnd, 'yyyy-MM-dd'),
-        });
-        
-        currentEndDate = newPhaseEnd;
-      });
     },
-    [draggingPhase, dragStartDate, unitWidth, projects, updatePhase, holidays]
+    [draggingPhase, dragStartDate, dragStartEndDate, unitWidth]
   );
 
   const handleMouseUp = useCallback(() => {
+    if (previewDates && draggingPhase) {
+      const { projectId, phaseId } = draggingPhase;
+      const project = projects.find(p => p.id === projectId);
+      if (project) {
+        updatePhase(projectId, phaseId, {
+          startDate: previewDates.startDate,
+          endDate: previewDates.endDate,
+        });
+
+        const phaseIndex = project.phases.findIndex(p => p.id === phaseId);
+        if (phaseIndex !== -1) {
+          const dependentPhases = project.phases.filter(
+            (p, i) => i > phaseIndex && p.dependencies?.some(d => d.phaseId === phaseId)
+          );
+
+          let currentEndDate = parseISO(previewDates.endDate);
+          dependentPhases.forEach((depPhase) => {
+            const newPhaseStart = calculateNewPhaseStart(depPhase, project.phases, currentEndDate, holidays);
+            const newPhaseEnd = calculatePhaseEndDate(newPhaseStart, depPhase.manDays, holidays);
+            
+            updatePhase(projectId, depPhase.id, {
+              startDate: format(newPhaseStart, 'yyyy-MM-dd'),
+              endDate: format(newPhaseEnd, 'yyyy-MM-dd'),
+            });
+            
+            currentEndDate = newPhaseEnd;
+          });
+        }
+      }
+    }
+
     setDraggingPhase(null);
     setDragStartDate(null);
     setDragStartEndDate(null);
-  }, []);
+    setPreviewDates(null);
+    lastClientXRef.current = null;
+  }, [previewDates, draggingPhase, projects, updatePhase, holidays]);
 
   useEffect(() => {
     if (draggingPhase) {
@@ -710,38 +725,47 @@ export default function Timeline() {
                           <div className="absolute left-0 right-0 pt-12 px-2 pb-2" style={{ height: height - 48 }}>
                             {project.phases.map((phase, phaseIndex) => {
                               if (!phase.startDate || !phase.endDate) return null;
-                              const barLeft = getDateOffset(phase.startDate);
-                              const barWidth = getPhaseWidth(phase.startDate, phase.endDate);
+                              
+                              const isDragging = draggingPhase?.phaseId === phase.id;
+                              const showPreview = isDragging && previewDates;
+                              
+                              const displayStartDate = showPreview ? previewDates.startDate : phase.startDate;
+                              const displayEndDate = showPreview ? previewDates.endDate : phase.endDate;
+                              
+                              const barLeft = getDateOffset(displayStartDate);
+                              const barWidth = getPhaseWidth(displayStartDate, displayEndDate);
                               const barTop = phaseIndex * 32 + 4;
                               const color = statusColors[phase.status || 'not_started'];
                               
                               const hasDependency = phase.dependencies && phase.dependencies.length > 0;
                               const depType = hasDependency ? phase.dependencies[0].type : null;
                               const depPercent = phase.dependencies?.[0]?.percentage;
-                              const isDragging = draggingPhase?.phaseId === phase.id;
 
                               return (
                                 <div
                                   key={phase.id}
-                                  className={`absolute h-7 rounded flex items-center text-xs text-white transition-shadow ${isDragging ? 'shadow-lg z-20' : 'hover:shadow-md cursor-move'}`}
+                                  className={`absolute h-7 rounded flex items-center text-xs text-white transition-shadow ${showPreview ? 'shadow-lg z-20 ring-2 ring-yellow-400' : 'hover:shadow-md cursor-move'}`}
                                   style={{
                                     left: barLeft,
                                     width: barWidth,
                                     top: barTop,
                                     backgroundColor: color,
+                                    opacity: showPreview ? 0.9 : 1,
                                   }}
-                                  title={`${phase.name}: ${phase.startDate} - ${phase.endDate}${hasDependency ? ` (依赖触发)` : ''}`}
+                                  title={`${phase.name}: ${displayStartDate} - ${displayEndDate}${hasDependency ? ` (依赖触发)` : ''}`}
                                 >
                                   {/* Left resize handle */}
-                                  <div
-                                    className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20 rounded-l"
-                                    onMouseDown={(e) => handlePhaseMouseDown(e, project.id, phase.id, 'resize-left', phase.startDate, phase.endDate)}
-                                  />
+                                  {!showPreview && (
+                                    <div
+                                      className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20 rounded-l"
+                                      onMouseDown={(e) => handlePhaseMouseDown(e, project.id, phase.id, 'resize-left', phase.startDate, phase.endDate)}
+                                    />
+                                  )}
                                   
                                   {/* Phase content - drag to move */}
                                   <div
                                     className="flex-1 flex items-center px-2 overflow-hidden"
-                                    onMouseDown={(e) => handlePhaseMouseDown(e, project.id, phase.id, 'move', phase.startDate, phase.endDate)}
+                                    onMouseDown={(e) => !showPreview && handlePhaseMouseDown(e, project.id, phase.id, 'move', phase.startDate, phase.endDate)}
                                   >
                                     <span className="truncate">{phase.name}</span>
                                     {phase.isKeyNode && <span className="ml-1 text-yellow-200">★</span>}
@@ -754,13 +778,16 @@ export default function Timeline() {
                                         {depType === 'SS_PARALLEL' && '↷'}
                                       </span>
                                     )}
+                                    {showPreview && <span className="ml-1 text-yellow-200 text-[10px]">[预览]</span>}
                                   </div>
                                   
                                   {/* Right resize handle */}
-                                  <div
-                                    className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20 rounded-r"
-                                    onMouseDown={(e) => handlePhaseMouseDown(e, project.id, phase.id, 'resize-right', phase.startDate, phase.endDate)}
-                                  />
+                                  {!showPreview && (
+                                    <div
+                                      className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20 rounded-r"
+                                      onMouseDown={(e) => handlePhaseMouseDown(e, project.id, phase.id, 'resize-right', phase.startDate, phase.endDate)}
+                                    />
+                                  )}
                                 </div>
                               );
                             })}
