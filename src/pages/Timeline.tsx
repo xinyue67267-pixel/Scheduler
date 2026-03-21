@@ -86,32 +86,22 @@ export default function Timeline() {
 
   // --- 1. Coordinate System ---
   const timeUnits = useMemo(() => {
+    // 统一使用周日作为周起始日 (weekStartsOn: 0)，以满足用户 3.1 属于下周的逻辑
     const start = viewMode === 'day' 
       ? addDays(today, -30) 
       : viewMode === 'week' 
-      ? startOfWeek(addWeeks(today, -12), { weekStartsOn: 1 })
+      ? startOfWeek(addWeeks(today, -12), { weekStartsOn: 0 })
       : startOfMonth(addMonths(today, -6));
     
     const end = addMonths(start, 24);
     
     if (viewMode === 'day') return eachDayOfInterval({ start, end });
-    if (viewMode === 'week') return eachWeekOfInterval({ start, end }, { weekStartsOn: 1 });
+    if (viewMode === 'week') return eachWeekOfInterval({ start, end }, { weekStartsOn: 0 });
     return eachMonthOfInterval({ start, end });
   }, [viewMode, today]);
 
   const unitWidth = useMemo(() => columnWidths[viewMode] * zoom, [columnWidths, viewMode, zoom]);
   const totalWidth = timeUnits.length * unitWidth;
-
-  const normalizeWeekDate = useCallback((dateInput: Date) => {
-    const normalizedDate = startOfDay(dateInput);
-    return normalizedDate.getDay() === 0 ? addDays(normalizedDate, 1) : normalizedDate;
-  }, []);
-
-  const getWeekBucketIndex = useCallback((dateInput: Date) => {
-    const rangeStart = timeUnits[0];
-    const weekAlignedDate = normalizeWeekDate(dateInput);
-    return Math.floor(differenceInCalendarDays(weekAlignedDate, rangeStart) / 7);
-  }, [timeUnits, normalizeWeekDate]);
 
   const getPixelOffset = useCallback((dateInput: string | Date | undefined | null) => {
     if (!dateInput || timeUnits.length === 0) return 0;
@@ -124,20 +114,12 @@ export default function Timeline() {
     const rangeStart = timeUnits[0];
     if (date < rangeStart) return 0;
 
-    if (viewMode === 'week') {
-      const weekIndex = getWeekBucketIndex(date);
-      if (weekIndex < 0) return 0;
-      if (weekIndex >= timeUnits.length) return totalWidth;
-      const weekAlignedDate = normalizeWeekDate(date);
-      const weekStart = addDays(timeUnits[0], weekIndex * 7);
-      const daysIntoWeek = differenceInCalendarDays(weekAlignedDate, weekStart);
-      const progress = Math.max(0, Math.min(1, daysIntoWeek / 7));
-      return (weekIndex + progress) * unitWidth;
-    }
-
+    // 统一索引查找逻辑，确保 Header 和环节块完全对齐
     let unitIndex = -1;
     if (viewMode === 'day') {
       unitIndex = differenceInCalendarDays(date, rangeStart);
+    } else if (viewMode === 'week') {
+      unitIndex = Math.floor(differenceInCalendarDays(date, rangeStart) / 7);
     } else {
       unitIndex = timeUnits.findIndex((u, idx) => {
         const next = timeUnits[idx + 1] || addMonths(u, 1);
@@ -145,35 +127,32 @@ export default function Timeline() {
       });
     }
 
-    if (unitIndex === -1 || unitIndex >= timeUnits.length) return totalWidth;
+    if (unitIndex === -1) return 0;
+    if (unitIndex >= timeUnits.length) return totalWidth;
 
     const currentUnitStart = timeUnits[unitIndex];
     const nextUnitStart = timeUnits[unitIndex + 1] || (
-      viewMode === 'day' ? addDays(currentUnitStart, 1) : addMonths(currentUnitStart, 1)
+      viewMode === 'day' ? addDays(currentUnitStart, 1) :
+      viewMode === 'week' ? addDays(currentUnitStart, 7) :
+      addMonths(currentUnitStart, 1)
     );
 
     const unitTotalDays = differenceInCalendarDays(nextUnitStart, currentUnitStart);
     const dayOffset = differenceInCalendarDays(date, currentUnitStart);
-    const progress = dayOffset / unitTotalDays;
+    const progress = unitTotalDays > 0 ? dayOffset / unitTotalDays : 0;
 
     return (unitIndex + progress) * unitWidth;
-  }, [viewMode, unitWidth, timeUnits, totalWidth, getWeekBucketIndex, normalizeWeekDate]);
+  }, [viewMode, unitWidth, timeUnits, totalWidth]);
 
   const getPhaseWidth = useCallback((start: string, end: string) => {
     const startDate = parseISO(start);
     const endDate = parseISO(end);
     if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) return 24;
 
-    if (viewMode === 'week') {
-      const s = getPixelOffset(startDate);
-      const e = getPixelOffset(addDays(endDate, 1));
-      return Math.max(e - s, Math.max(12, unitWidth / 7));
-    }
-
     const s = getPixelOffset(startDate);
     const e = getPixelOffset(addDays(endDate, 1));
     return Math.max(e - s, 24);
-  }, [getPixelOffset, viewMode, unitWidth]);
+  }, [getPixelOffset]);
 
   // --- 2. Data Processing ---
   const filteredData = useMemo(() => {
@@ -299,11 +278,11 @@ export default function Timeline() {
               {viewMode === 'day'
                 ? format(unit, 'MM/dd')
                 : viewMode === 'week'
-                ? `${format(unit, 'MM/dd')}-${format(addDays(unit, 6), 'MM/dd')}`
+                ? `${format(addDays(unit, 1), 'MM/dd')}-${format(addDays(unit, 7), 'MM/dd')}`
                 : format(unit, 'yyyy/MM')}
             </span>
             <span className="text-[10px] text-gray-400 mt-0.5">
-              {viewMode === 'day' ? format(unit, 'EEE', { locale: zhCN }) : format(unit, 'MM/dd')}
+              {viewMode === 'day' ? format(unit, 'EEE', { locale: zhCN }) : format(addDays(unit, 1), 'MM/dd')}
             </span>
           </div>
         );
@@ -331,8 +310,6 @@ export default function Timeline() {
       
       const left = getPixelOffset(displayStart);
       const width = getPhaseWidth(displayStart, displayEnd);
-      const weekStartBucket = viewMode === 'week' ? getWeekBucketIndex(parseISO(displayStart)) : null;
-      const weekEndBucket = viewMode === 'week' ? getWeekBucketIndex(parseISO(displayEnd)) : null;
       positions.set(phase.id, { top, left, width });
 
       return (
@@ -344,11 +321,6 @@ export default function Timeline() {
           >
             <div className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/30" onMouseDown={e => { e.stopPropagation(); handleMouseDown(e, row.projectId, phase, 'resize-left'); }} />
             <span className="truncate select-none font-medium">{phase.name}</span>
-            {viewMode === 'week' && weekStartBucket !== null && weekEndBucket !== null && (
-              <span className="ml-2 text-[9px] text-white/80 whitespace-nowrap">
-                W{weekStartBucket + 1}-W{weekEndBucket + 1}
-              </span>
-            )}
             <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/30" onMouseDown={e => { e.stopPropagation(); handleMouseDown(e, row.projectId, phase, 'resize-right'); }} />
           </div>
         </div>
