@@ -1,4 +1,6 @@
-import { createContext, useContext, useState, useEffect, ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, ReactNode, useCallback } from 'react';
+import { useStore } from '@/store';
+import { getDefaultData, loadUserData, saveUserData } from '@/utils/perUserStorage';
 
 interface User {
   id: string;
@@ -35,9 +37,49 @@ interface AuthProviderProps {
 export function AuthProvider({ children, supabaseUrl, supabaseKey }: AuthProviderProps) {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const loadAllData = useStore((state) => state.loadAllData);
+
+  const loadUserDataToStore = useCallback((uid: string) => {
+    const stored = loadUserData(uid);
+    if (stored) {
+      loadAllData(stored);
+    } else {
+      loadAllData(getDefaultData());
+    }
+  }, [loadAllData]);
+
+  const saveCurrentUserData = useCallback(() => {
+    const currentUserId = localStorage.getItem('scheduler_current_user_id');
+    if (currentUserId) {
+      const state = useStore.getState();
+      saveUserData(currentUserId, {
+        pipelines: state.pipelines,
+        paradigms: state.paradigms,
+        projects: state.projects,
+        workCalendars: state.workCalendars,
+        holidays: state.holidays,
+        fields: state.fields,
+        categories: state.categories,
+        levels: state.levels,
+        roles: state.roles,
+        notifications: state.notifications,
+      });
+    }
+  }, []);
 
   useEffect(() => {
     if (!supabaseUrl || !supabaseKey) {
+      const savedUser = localStorage.getItem('scheduler_user');
+      if (savedUser) {
+        try {
+          const parsedUser = JSON.parse(savedUser);
+          setUser(parsedUser);
+          localStorage.setItem('scheduler_current_user_id', parsedUser.id);
+          loadUserDataToStore(parsedUser.id);
+        } catch {
+          localStorage.removeItem('scheduler_user');
+        }
+      }
       setIsLoading(false);
       return;
     }
@@ -51,10 +93,11 @@ export function AuthProvider({ children, supabaseUrl, supabaseKey }: AuthProvide
       }
     }
     setIsLoading(false);
-  }, [supabaseUrl, supabaseKey]);
+  }, [supabaseUrl, supabaseKey, loadUserDataToStore]);
 
   const login = async (email: string, password: string) => {
     if (!supabaseUrl || !supabaseKey) {
+      saveCurrentUserData();
       const mockUser: User = {
         id: 'demo-' + Date.now(),
         email,
@@ -62,7 +105,9 @@ export function AuthProvider({ children, supabaseUrl, supabaseKey }: AuthProvide
       };
       setUser(mockUser);
       localStorage.setItem('scheduler_user', JSON.stringify(mockUser));
+      localStorage.setItem('scheduler_current_user_id', mockUser.id);
       localStorage.setItem('scheduler_is_authenticated', 'true');
+      loadUserDataToStore(mockUser.id);
       return { success: true };
     }
 
@@ -90,9 +135,11 @@ export function AuthProvider({ children, supabaseUrl, supabaseKey }: AuthProvide
 
       setUser(userData);
       localStorage.setItem('scheduler_user', JSON.stringify(userData));
+      localStorage.setItem('scheduler_current_user_id', userData.id);
       localStorage.setItem('scheduler_access_token', data.access_token);
       localStorage.setItem('scheduler_refresh_token', data.refresh_token);
       localStorage.setItem('scheduler_is_authenticated', 'true');
+      loadUserDataToStore(userData.id);
 
       return { success: true };
     } catch (error) {
@@ -102,6 +149,7 @@ export function AuthProvider({ children, supabaseUrl, supabaseKey }: AuthProvide
 
   const register = async (email: string, password: string, name?: string) => {
     if (!supabaseUrl || !supabaseKey) {
+      saveCurrentUserData();
       const mockUser: User = {
         id: 'demo-' + Date.now(),
         email,
@@ -109,7 +157,9 @@ export function AuthProvider({ children, supabaseUrl, supabaseKey }: AuthProvide
       };
       setUser(mockUser);
       localStorage.setItem('scheduler_user', JSON.stringify(mockUser));
+      localStorage.setItem('scheduler_current_user_id', mockUser.id);
       localStorage.setItem('scheduler_is_authenticated', 'true');
+      loadUserDataToStore(mockUser.id);
       return { success: true };
     }
 
@@ -136,11 +186,13 @@ export function AuthProvider({ children, supabaseUrl, supabaseKey }: AuthProvide
   };
 
   const logout = () => {
+    saveCurrentUserData();
     setUser(null);
     localStorage.removeItem('scheduler_user');
     localStorage.removeItem('scheduler_access_token');
     localStorage.removeItem('scheduler_refresh_token');
     localStorage.removeItem('scheduler_is_authenticated');
+    localStorage.removeItem('scheduler_current_user_id');
   };
 
   const updateUser = (updates: Partial<User>) => {

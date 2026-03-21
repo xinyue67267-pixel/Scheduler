@@ -1,5 +1,4 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
 import type {
   Pipeline,
   Paradigm,
@@ -38,6 +37,8 @@ interface AppState {
   columnWidths: ColumnWidthPreferences;
   
   exportConfig: ExportConfig;
+  
+  loadAllData: (data: Partial<AppState>) => void;
   
   addPipeline: (pipeline: Pipeline) => void;
   updatePipeline: (id: string, data: Partial<Pipeline>) => void;
@@ -244,8 +245,7 @@ const defaultProjects: Project[] = [
 ];
 
 export const useStore = create<AppState>()(
-  persist(
-    (set) => ({
+  (set) => ({
       columnWidths: DEFAULT_COLUMN_WIDTHS,
       pipelines: defaultPipelines,
       paradigms: defaultParadigms,
@@ -274,6 +274,20 @@ export const useStore = create<AppState>()(
           holidays: true,
         },
       },
+
+      loadAllData: (data) =>
+        set((state) => ({
+          pipelines: data.pipelines ?? state.pipelines,
+          paradigms: data.paradigms ?? state.paradigms,
+          projects: data.projects ?? state.projects,
+          workCalendars: data.workCalendars ?? state.workCalendars,
+          holidays: data.holidays ?? state.holidays,
+          fields: data.fields ?? state.fields,
+          categories: data.categories ?? state.categories,
+          levels: data.levels ?? state.levels,
+          roles: data.roles ?? state.roles,
+          notifications: data.notifications ?? state.notifications,
+        })),
 
       addPipeline: (pipeline) =>
         set((state) => ({ pipelines: [...state.pipelines, pipeline] })),
@@ -406,9 +420,5 @@ export const useStore = create<AppState>()(
           ),
         })),
       clearNotifications: () => set({ notifications: [] }),
-    }),
-    {
-      name: 'scheduler-storage',
-    }
-  )
+    })
 );
