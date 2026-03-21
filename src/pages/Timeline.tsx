@@ -282,9 +282,13 @@ export default function Timeline() {
 
   const handleBodyScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const scrollLeft = e.currentTarget.scrollLeft;
+    const scrollTop = e.currentTarget.scrollTop;
     setScrollX(scrollLeft);
     if (headerRef.current) {
       headerRef.current.scrollLeft = scrollLeft;
+    }
+    if (listRef.current) {
+      listRef.current.scrollTop = scrollTop;
     }
   };
 
@@ -370,6 +374,7 @@ export default function Timeline() {
   );
 
   const handleMouseUp = useCallback(() => {
+    let newStartDate = '';
     if (previewDates && draggingPhase) {
       const { projectId, phaseId } = draggingPhase;
       const project = projects.find(p => p.id === projectId);
@@ -378,6 +383,7 @@ export default function Timeline() {
           startDate: previewDates.startDate,
           endDate: previewDates.endDate,
         });
+        newStartDate = previewDates.startDate;
 
         const phaseIndex = project.phases.findIndex(p => p.id === phaseId);
         if (phaseIndex !== -1) {
@@ -406,7 +412,27 @@ export default function Timeline() {
     setDragStartEndDate(null);
     setPreviewDates(null);
     lastClientXRef.current = null;
-  }, [previewDates, draggingPhase, projects, updatePhase, holidays]);
+
+    if (newStartDate) {
+      setTimeout(() => {
+        const left = getDateOffset(newStartDate);
+        ensureVisibleLeft(left);
+      }, 0);
+    }
+  }, [previewDates, draggingPhase, projects, updatePhase, holidays, getDateOffset]);
+
+  const ensureVisibleLeft = (left: number) => {
+    const el = bodyRef.current;
+    if (!el) return;
+    const viewportLeft = el.scrollLeft;
+    const viewportRight = viewportLeft + el.clientWidth;
+    const padding = 200;
+    if (left < viewportLeft + padding) {
+      el.scrollTo({ left: Math.max(0, left - padding), behavior: 'smooth' });
+    } else if (left > viewportRight - padding) {
+      el.scrollTo({ left: left - el.clientWidth + padding * 2, behavior: 'smooth' });
+    }
+  };
 
   useEffect(() => {
     if (draggingPhase) {
@@ -558,7 +584,8 @@ export default function Timeline() {
                       return (
                         <div 
                           key={project.id} 
-                          className="border-l-2 border-transparent hover:border-blue-300"
+                          className="border-l-2 border-transparent hover:border-blue-300 overflow-hidden"
+                          style={{ height: rowHeight }}
                         >
                           <div 
                             className="pl-8 pr-4 hover:bg-gray-50 cursor-pointer flex items-center gap-2"
@@ -580,9 +607,9 @@ export default function Timeline() {
                             </div>
                             <span className="text-xs text-gray-400 flex-shrink-0">{phaseCount}环节</span>
                           </div>
-                          {!isCollapsed && (
-                            <div className="pl-10 pr-4 pb-2">
-                              <div className="flex items-center gap-3">
+                          {!isCollapsed && phaseCount > 0 && (
+                            <div className="pl-10 pr-4" style={{ height: phaseHeight }}>
+                              <div className="flex items-center gap-3 h-4">
                                 <span className="text-xs text-gray-400">{project.manager}</span>
                                 {project.dependencies.length > 0 && (
                                   <span className="flex items-center gap-0.5 text-xs text-blue-600">
@@ -591,7 +618,7 @@ export default function Timeline() {
                                   </span>
                                 )}
                               </div>
-                              <div className="mt-1.5 h-1 bg-gray-100 rounded-full overflow-hidden">
+                              <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
                                 <div
                                   className="h-full rounded-full transition-all"
                                   style={{ width: `${project.progress || 0}%`, backgroundColor: pipeline.color }}
