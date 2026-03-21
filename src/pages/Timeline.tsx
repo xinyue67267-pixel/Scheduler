@@ -151,9 +151,14 @@ export default function Timeline() {
     return grouped;
   }, [filteredProjects, pipelines]);
 
+  const parseDate = (dateStr: string): Date => {
+    const [year, month, day] = dateStr.split('-').map(Number);
+    return new Date(year, month - 1, day);
+  };
+
   const getDateOffset = useCallback(
     (date: Date | string): number => {
-      const d = typeof date === 'string' ? parseISO(date) : date;
+      const d = typeof date === 'string' ? parseDate(date) : date;
       const daysDiff = differenceInDays(d, viewConfig.start);
       const divisor = viewMode === 'day' ? 1 : viewMode === 'week' ? 7 : 30;
       return (daysDiff / divisor) * unitWidth;
@@ -163,8 +168,8 @@ export default function Timeline() {
 
   const getPhaseWidth = useCallback(
     (start: string, end: string): number => {
-      const startD = parseISO(start);
-      const endD = parseISO(end);
+      const startD = parseDate(start);
+      const endD = parseDate(end);
       const days = differenceInDays(endD, startD) + 1;
       const divisor = viewMode === 'day' ? 1 : viewMode === 'week' ? 7 : 30;
       return Math.max((days / divisor) * unitWidth, 40);
@@ -232,8 +237,8 @@ export default function Timeline() {
       const depPhase = allPhases.find(p => p.id === dep.phaseId);
       if (!depPhase?.startDate || !depPhase?.endDate) continue;
 
-      const depStart = parseISO(depPhase.startDate);
-      const depEnd = parseISO(depPhase.endDate);
+      const depStart = parseDate(depPhase.startDate);
+      const depEnd = parseDate(depPhase.endDate);
 
       let triggerDate: Date;
 
@@ -342,8 +347,8 @@ export default function Timeline() {
       lastClientXRef.current = currentX;
 
       const { phaseId, type } = draggingPhase;
-      const startDate = parseISO(dragStartDate);
-      const endDate = dragStartEndDate ? parseISO(dragStartEndDate) : startDate;
+      const startDate = parseDate(dragStartDate);
+      const endDate = dragStartEndDate ? parseDate(dragStartEndDate) : startDate;
 
       let newStartDate: Date;
       let newEndDate: Date;
@@ -391,7 +396,7 @@ export default function Timeline() {
             (p, i) => i > phaseIndex && p.dependencies?.some(d => d.phaseId === phaseId)
           );
 
-          let currentEndDate = parseISO(previewDates.endDate);
+          let currentEndDate = parseDate(previewDates.endDate);
           dependentPhases.forEach((depPhase) => {
             const newPhaseStart = calculateNewPhaseStart(depPhase, project.phases, currentEndDate, holidays);
             const newPhaseEnd = calculatePhaseEndDate(newPhaseStart, depPhase.manDays, holidays);
