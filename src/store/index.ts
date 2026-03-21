@@ -327,19 +327,44 @@ export const useStore = create<AppState>()(
         set((state) => ({
           projects: state.projects.filter((p) => p.id !== id),
         })),
-      updatePhase: (projectId, phaseId, data) =>
-        set((state) => ({
-          projects: state.projects.map((p) =>
-            p.id === projectId
-              ? {
-                  ...p,
-                  phases: p.phases.map((ph) =>
-                    ph.id === phaseId ? { ...ph, ...data } : ph
-                  ),
+      updatePhase: (projectId, phaseId, updates) => {
+        set((state) => {
+          const newProjects = state.projects.map((project) => {
+            if (project.id === projectId) {
+              const newPhases = project.phases.map((phase) => {
+                if (phase.id === phaseId) {
+                  return { ...phase, ...updates };
                 }
-              : p
-          ),
-        })),
+                return phase;
+              });
+              return { ...project, phases: newPhases };
+            }
+            return project;
+          });
+          
+          const newState = { ...state, projects: newProjects };
+          
+          // Persistence
+          const user = (state as any).user;
+          if (user) {
+            // @ts-ignore
+            saveUserData(user.uid, {
+              pipelines: state.pipelines,
+              paradigms: state.paradigms,
+              projects: newProjects,
+              workCalendars: state.workCalendars,
+              holidays: state.holidays,
+              fields: state.fields,
+              categories: state.categories,
+              levels: state.levels,
+              roles: state.roles,
+              notifications: state.notifications,
+            });
+          }
+          
+          return newState;
+        });
+      },
 
       addDependency: (dependency) =>
         set((state) => ({

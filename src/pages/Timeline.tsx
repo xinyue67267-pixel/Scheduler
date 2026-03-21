@@ -1,17 +1,4 @@
-import { useState, useMemo, useRef, useCallback, useEffect } from 'react';
-import { addDays, parseISO, differenceInDays, format } from 'date-fns';
-import {
-  Search,
-  Download,
-  Calendar as CalendarIcon,
-  ChevronDown,
-  ChevronRight,
-  Plus,
-  ZoomIn,
-  ZoomOut,
-  Link2,
-  RotateCcw,
-} from 'lucide-react';
+import React, { useState, useMemo, useRef, useCallback, useEffect } from 'react';
 import {
   format,
   addDays,
@@ -20,869 +7,501 @@ import {
   eachDayOfInterval,
   eachWeekOfInterval,
   eachMonthOfInterval,
-  isWeekend,
   isSameDay,
-  differenceInDays,
-  parseISO,
+  differenceInCalendarDays,
   startOfMonth,
-  endOfMonth,
+  startOfDay,
+  startOfWeek,
+  isWithinInterval,
+  parseISO,
 } from 'date-fns';
 import { zhCN } from 'date-fns/locale';
+import {
+  Search,
+  Download,
+  ChevronDown,
+  ChevronRight,
+  ZoomIn,
+  ZoomOut,
+  Calendar,
+  Filter,
+} from 'lucide-react';
 import { useStore } from '@/store';
-import type { Project, Phase, Dependency, ViewMode } from '@/types';
+import type { Project, ViewMode, Phase } from '@/types';
 import ExportModal from '@/components/Export/ExportModal';
 
-const levelColors: Record<string, string> = {
-  P0: '#E34D4D',
-  P1: '#ED7B2F',
-  P2: '#0052D9',
-  P3: '#8A95A5',
-};
+/**
+ * --- Timeline Architecture v2.0 ---
+ * 1. Linear Mapping: Dates are mapped to pixels via timeUnits index.
+ * 2. Unified Scroll: Sidebar and Canvas sync vertically via refs.
+ * 3. Interaction: Dragging uses a preview state for high performance.
+ * 4. Geometry: All elements (Header, Grid, Phase, Deps) share the same coordinate logic.
+ */
 
-const statusColors: Record<string, string> = {
-  not_started: '#8A95A5',
-  in_progress: '#0052D9',
-  completed: '#00A870',
-  overdue: '#E34D4D',
-};
+// UI Constants
+const SIDEBAR_WIDTH = 280;
+const HEADER_HEIGHT = 64;
+const ROW_PROJECT_HEIGHT = 44;
+const ROW_PHASE_HEIGHT = 36;
 
-const statusLabels: Record<string, string> = {
-  not_started: '未开始',
-  in_progress: '进行中',
-  completed: '已完成',
-  overdue: '逾期',
+const STATUS_COLORS: Record<string, string> = {
+  not_started: '#94a3b8', // slate-400
+  in_progress: '#3b82f6', // blue-500
+  completed: '#10b981',   // emerald-500
+  overdue: '#ef4444',     // red-500
 };
 
 export default function Timeline() {
   const {
     projects,
     pipelines,
-    holidays,
     viewMode,
     setViewMode,
     selectedPipelineIds,
-    setSelectedPipelines,
-    showOnlyWithDependencies,
-    setShowOnlyWithDependencies,
     columnWidths,
     updatePhase,
   } = useStore();
 
+  // --- UI State ---
   const [searchQuery, setSearchQuery] = useState('');
-  const [expandedPipelines, setExpandedPipelines] = useState<string[]>(
-    pipelines.map((p) => p.id)
-  );
-  const [showExportModal, setShowExportModal] = useState(false);
-  const [scrollX, setScrollX] = useState(0);
   const [zoom, setZoom] = useState(1);
-  const headerRef = useRef<HTMLDivElement>(null);
-  const bodyRef = useRef<HTMLDivElement>(null);
-  const listRef = useRef<HTMLDivElement>(null);
   const [collapsedProjects, setCollapsedProjects] = useState<Set<string>>(new Set());
-  const [draggingPhase, setDraggingPhase] = useState<{ projectId: string; phaseId: string; type: 'move' | 'resize-left' | 'resize-right' } | null>(null);
-  const [dragStartX, setDragStartX] = useState(0);
-  const [dragStartDate, setDragStartDate] = useState<string | null>(null);
-  const [dragStartEndDate, setDragStartEndDate] = useState<string | null>(null);
-  const [previewDates, setPreviewDates] = useState<{ startDate: string; endDate: string } | null>(null);
-  const lastClientXRef = useRef<number | null>(null);
+  const [showExportModal, setShowExportModal] = useState(false);
   
-  const today = new Date();
+  // Drag State
+  const [dragging, setDragging] = useState<{
+    projectId: string;
+    phaseId: string;
+    type: 'move' | 'resize-left' | 'resize-right';
+    originalStart: string;
+    originalEnd: string;
+    startX: number;
+  } | null>(null);
+  const [dragPreview, setDragPreview] = useState<{ start: string; end: string } | null>(null);
 
-  const viewConfig = useMemo(() => {
-    const configs = {
-      day: {
-        start: addDays(today, -30),
-        end: addDays(today, 90),
-        baseWidth: columnWidths.day,
-      },
-      week: {
-        start: addWeeks(today, -12),
-        end: addWeeks(today, 36),
-        baseWidth: columnWidths.week,
-      },
-      month: {
-        start: addMonths(today, -12),
-        end: addMonths(today, 24),
-        baseWidth: columnWidths.month,
-      },
-    };
-    return configs[viewMode];
-  }, [viewMode, columnWidths, today]);
+  // Refs
+  const sidebarRef = useRef<HTMLDivElement>(null);
+  const canvasRef = useRef<HTMLDivElement>(null);
+  const today = useMemo(() => startOfDay(new Date()), []);
 
+  // --- 1. Coordinate System ---
   const timeUnits = useMemo(() => {
-    const { start, end } = viewConfig;
-    switch (viewMode) {
-      case 'day':
-        return eachDayOfInterval({ start, end });
-      case 'week':
-        return eachWeekOfInterval({ start, end }, { weekStartsOn: 1 });
-      case 'month':
-        return eachMonthOfInterval({ start, end });
-    }
-  }, [viewConfig, viewMode]);
+    const start = viewMode === 'day' 
+      ? addDays(today, -30) 
+      : viewMode === 'week' 
+      ? startOfWeek(addWeeks(today, -12), { weekStartsOn: 1 })
+      : startOfMonth(addMonths(today, -6));
+    
+    const end = addMonths(start, 24);
+    
+    if (viewMode === 'day') return eachDayOfInterval({ start, end });
+    if (viewMode === 'week') return eachWeekOfInterval({ start, end }, { weekStartsOn: 1 });
+    return eachMonthOfInterval({ start, end });
+  }, [viewMode, today]);
 
-  const unitWidth = viewConfig.baseWidth * zoom;
+  const unitWidth = useMemo(() => columnWidths[viewMode] * zoom, [columnWidths, viewMode, zoom]);
   const totalWidth = timeUnits.length * unitWidth;
 
-  const filteredProjects = useMemo(() => {
-    let filtered = [...projects];
-    if (selectedPipelineIds.length > 0) {
-      filtered = filtered.filter((p) => selectedPipelineIds.includes(p.pipelineId));
-    }
-    if (showOnlyWithDependencies) {
-      filtered = filtered.filter((p) => p.dependencies.length > 0);
-    }
-    if (searchQuery) {
-      const query = searchQuery.toLowerCase();
-      filtered = filtered.filter(
-        (p) =>
-          p.name.toLowerCase().includes(query) ||
-          p.phases.some((ph) => ph.name.toLowerCase().includes(query))
-      );
-    }
-    return filtered;
-  }, [projects, selectedPipelineIds, showOnlyWithDependencies, searchQuery]);
+  const getWeekBucketIndex = useCallback((dateInput: Date) => {
+    const rangeStart = timeUnits[0];
+    const normalizedDate = startOfDay(dateInput);
+    const weekAlignedDate = normalizedDate.getDay() === 0 ? addDays(normalizedDate, 1) : normalizedDate;
+    return Math.floor(differenceInCalendarDays(weekAlignedDate, rangeStart) / 7);
+  }, [timeUnits]);
 
-  const groupedProjects = useMemo(() => {
-    const grouped: Record<string, Project[]> = {};
-    pipelines.forEach((pipeline) => {
-      grouped[pipeline.id] = filteredProjects.filter((p) => p.pipelineId === pipeline.id);
-    });
-    return grouped;
-  }, [filteredProjects, pipelines]);
+  const getPixelOffset = useCallback((dateInput: string | Date | undefined | null) => {
+    if (!dateInput || timeUnits.length === 0) return 0;
+    let date: Date;
+    try {
+      date = startOfDay(typeof dateInput === 'string' ? parseISO(dateInput) : dateInput);
+      if (isNaN(date.getTime())) return 0;
+    } catch (e) { return 0; }
 
-  const parseDate = (dateStr: string): Date => {
-    const [year, month, day] = dateStr.split('-').map(Number);
-    return new Date(year, month - 1, day);
-  };
+    const rangeStart = timeUnits[0];
+    if (date < rangeStart) return 0;
 
-  const getDateOffset = useCallback(
-    (date: Date | string): number => {
-      const d = typeof date === 'string' ? parseDate(date) : date;
-      const daysDiff = differenceInDays(d, viewConfig.start);
-      const divisor = viewMode === 'day' ? 1 : viewMode === 'week' ? 7 : 30;
-      return (daysDiff / divisor) * unitWidth;
-    },
-    [viewConfig.start, unitWidth, viewMode]
-  );
-
-  const getPhaseWidth = useCallback(
-    (start: string, end: string): number => {
-      const startD = parseDate(start);
-      const endD = parseDate(end);
-      const days = differenceInDays(endD, startD) + 1;
-      const divisor = viewMode === 'day' ? 1 : viewMode === 'week' ? 7 : 30;
-      return Math.max((days / divisor) * unitWidth, 40);
-    },
-    [unitWidth, viewMode]
-  );
-
-  const isDateInHoliday = (date: Date): boolean => {
-    const dateStr = format(date, 'yyyy-MM-dd');
-    return holidays.some(
-      (h) => h.type === 'holiday' && dateStr >= h.startDate && dateStr <= h.endDate
-    );
-  };
-
-  const getHolidayInfo = (date: Date): string | null => {
-    const dateStr = format(date, 'yyyy-MM-dd');
-    const holiday = holidays.find(
-      (h) => h.type === 'holiday' && dateStr >= h.startDate && dateStr <= h.endDate
-    );
-    return holiday ? holiday.name : null;
-  };
-
-  const isWorkingDay = (date: Date): boolean => {
-    const dayOfWeek = date.getDay();
-    if (dayOfWeek === 0 || dayOfWeek === 6) return false;
-    const dateStr = format(date, 'yyyy-MM-dd');
-    return !holidays.some(
-      (h) => h.type === 'holiday' && dateStr >= h.startDate && dateStr <= h.endDate
-    );
-  };
-
-  const skipToNextWorkingDay = (date: Date): Date => {
-    let result = new Date(date);
-    while (!isWorkingDay(result)) {
-      result = addDays(result, 1);
-    }
-    return result;
-  };
-
-  const calculatePhaseEndDate = (startDate: Date, manDays: number): Date => {
-    let currentDate = new Date(startDate);
-    let remainingDays = manDays;
-    while (remainingDays > 0) {
-      currentDate = addDays(currentDate, 1);
-      if (isWorkingDay(currentDate)) {
-        remainingDays--;
-      }
-    }
-    return currentDate;
-  };
-
-  const calculateNewPhaseStart = (
-    phase: { manDays: number; dependencies?: { phaseId: string; type: string; percentage?: number; offsetDays?: number }[] },
-    allPhases: { id: string; startDate?: string; endDate?: string; manDays: number }[],
-    baseEndDate: Date,
-    holidays: { startDate: string; endDate: string; type: string }[]
-  ): Date => {
-    if (!phase.dependencies || phase.dependencies.length === 0) {
-      return skipToNextWorkingDay(baseEndDate);
+    if (viewMode === 'week') {
+      const weekIndex = getWeekBucketIndex(date);
+      if (weekIndex < 0) return 0;
+      if (weekIndex >= timeUnits.length) return totalWidth;
+      return weekIndex * unitWidth;
     }
 
-    let latestStartDate: Date | null = null;
-
-    for (const dep of phase.dependencies) {
-      const depPhase = allPhases.find(p => p.id === dep.phaseId);
-      if (!depPhase?.startDate || !depPhase?.endDate) continue;
-
-      const depStart = parseDate(depPhase.startDate);
-      const depEnd = parseDate(depPhase.endDate);
-
-      let triggerDate: Date;
-
-      switch (dep.type) {
-        case 'FS':
-          triggerDate = skipToNextWorkingDay(depEnd);
-          break;
-        case 'FS_PERCENT':
-          const percent = dep.percentage || 50;
-          const offsetDays = Math.floor(depPhase.manDays * (percent / 100));
-          let current = new Date(depStart);
-          let workedDays = 0;
-          while (workedDays < offsetDays) {
-            current = addDays(current, 1);
-            if (isWorkingDay(current)) workedDays++;
-          }
-          triggerDate = current;
-          break;
-        case 'FS_OFFSET':
-          triggerDate = skipToNextWorkingDay(addDays(depEnd, dep.offsetDays || 0));
-          break;
-        case 'SS_OFFSET':
-          triggerDate = addDays(depStart, dep.offsetDays || 0);
-          if (!isWorkingDay(triggerDate)) triggerDate = skipToNextWorkingDay(triggerDate);
-          break;
-        case 'SS_PARALLEL':
-          triggerDate = depStart;
-          break;
-        default:
-          triggerDate = skipToNextWorkingDay(depEnd);
-      }
-
-      if (!latestStartDate || triggerDate > latestStartDate) {
-        latestStartDate = triggerDate;
-      }
-    }
-
-    return latestStartDate || skipToNextWorkingDay(baseEndDate);
-  };
-
-  const togglePipeline = (pipelineId: string) => {
-    setExpandedPipelines((prev) =>
-      prev.includes(pipelineId) ? prev.filter((id) => id !== pipelineId) : [...prev, pipelineId]
-    );
-  };
-
-  const handleBodyScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const scrollLeft = e.currentTarget.scrollLeft;
-    const scrollTop = e.currentTarget.scrollTop;
-    setScrollX(scrollLeft);
-    if (headerRef.current) {
-      headerRef.current.scrollLeft = scrollLeft;
-    }
-    if (listRef.current) {
-      listRef.current.scrollTop = scrollTop;
-    }
-  };
-
-  const handleListScroll = (e: React.UIEvent<HTMLDivElement>) => {
-    const scrollTop = e.currentTarget.scrollTop;
-    if (bodyRef.current) {
-      bodyRef.current.scrollTop = scrollTop;
-    }
-  };
-
-  const toggleProject = (projectId: string) => {
-    setCollapsedProjects(prev => {
-      const next = new Set(prev);
-      if (next.has(projectId)) {
-        next.delete(projectId);
-      } else {
-        next.add(projectId);
-      }
-      return next;
-    });
-  };
-
-  const handlePhaseMouseDown = (
-    e: React.MouseEvent,
-    projectId: string,
-    phaseId: string,
-    type: 'move' | 'resize-left' | 'resize-right',
-    startDate?: string,
-    endDate?: string
-  ) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setDraggingPhase({ projectId, phaseId, type });
-    setDragStartX(e.clientX);
-    setDragStartDate(startDate || null);
-    setDragStartEndDate(endDate || null);
-    setPreviewDates(null);
-    lastClientXRef.current = e.clientX;
-  };
-
-  const handleMouseMove = useCallback(
-    (e: MouseEvent) => {
-      if (!draggingPhase || !dragStartDate) return;
-
-      const currentX = e.clientX;
-      const lastX = lastClientXRef.current ?? dragStartX;
-      const deltaX = currentX - lastX;
-      const daysDelta = Math.round(deltaX / unitWidth);
-
-      if (daysDelta === 0) return;
-      lastClientXRef.current = currentX;
-
-      const { phaseId, type } = draggingPhase;
-      const startDate = parseDate(dragStartDate);
-      const endDate = dragStartEndDate ? parseDate(dragStartEndDate) : startDate;
-
-      let newStartDate: Date;
-      let newEndDate: Date;
-
-      if (type === 'move') {
-        newStartDate = addDays(startDate, daysDelta);
-        newEndDate = addDays(endDate, daysDelta);
-      } else if (type === 'resize-left') {
-        newStartDate = addDays(startDate, daysDelta);
-        if (newStartDate >= endDate) {
-          newStartDate = addDays(endDate, -1);
-        }
-        newEndDate = endDate;
-      } else {
-        newEndDate = addDays(endDate, daysDelta);
-        if (newEndDate <= startDate) {
-          newEndDate = addDays(startDate, 1);
-        }
-        newStartDate = startDate;
-      }
-
-      setPreviewDates({
-        startDate: format(newStartDate, 'yyyy-MM-dd'),
-        endDate: format(newEndDate, 'yyyy-MM-dd'),
+    let unitIndex = -1;
+    if (viewMode === 'day') {
+      unitIndex = differenceInCalendarDays(date, rangeStart);
+    } else {
+      unitIndex = timeUnits.findIndex((u, idx) => {
+        const next = timeUnits[idx + 1] || addMonths(u, 1);
+        return date >= u && date < next;
       });
-    },
-    [draggingPhase, dragStartDate, dragStartEndDate, unitWidth]
-  );
+    }
 
-  const handleMouseUp = useCallback(() => {
-    let newStartDate = '';
-    if (previewDates && draggingPhase) {
-      const { projectId, phaseId } = draggingPhase;
-      const project = projects.find(p => p.id === projectId);
-      if (project) {
-        updatePhase(projectId, phaseId, {
-          startDate: previewDates.startDate,
-          endDate: previewDates.endDate,
-        });
-        newStartDate = previewDates.startDate;
+    if (unitIndex === -1 || unitIndex >= timeUnits.length) return totalWidth;
 
-        const phaseIndex = project.phases.findIndex(p => p.id === phaseId);
-        if (phaseIndex !== -1) {
-          const dependentPhases = project.phases.filter(
-            (p, i) => i > phaseIndex && p.dependencies?.some(d => d.phaseId === phaseId)
-          );
+    const currentUnitStart = timeUnits[unitIndex];
+    const nextUnitStart = timeUnits[unitIndex + 1] || (
+      viewMode === 'day' ? addDays(currentUnitStart, 1) : addMonths(currentUnitStart, 1)
+    );
 
-          let currentEndDate = parseDate(previewDates.endDate);
-          dependentPhases.forEach((depPhase) => {
-            const newPhaseStart = calculateNewPhaseStart(depPhase, project.phases, currentEndDate, holidays);
-            const newPhaseEnd = calculatePhaseEndDate(newPhaseStart, depPhase.manDays, holidays);
-            
-            updatePhase(projectId, depPhase.id, {
-              startDate: format(newPhaseStart, 'yyyy-MM-dd'),
-              endDate: format(newPhaseEnd, 'yyyy-MM-dd'),
-            });
-            
-            currentEndDate = newPhaseEnd;
-          });
+    const unitTotalDays = differenceInCalendarDays(nextUnitStart, currentUnitStart);
+    const dayOffset = differenceInCalendarDays(date, currentUnitStart);
+    const progress = dayOffset / unitTotalDays;
+
+    return (unitIndex + progress) * unitWidth;
+  }, [viewMode, unitWidth, timeUnits, totalWidth, getWeekBucketIndex]);
+
+  const getPhaseWidth = useCallback((start: string, end: string) => {
+    const startDate = parseISO(start);
+    const endDate = parseISO(end);
+    if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) return 24;
+
+    if (viewMode === 'week') {
+      const startBucket = getWeekBucketIndex(startDate);
+      const endBucket = getWeekBucketIndex(endDate);
+      const bucketSpan = Math.max(1, endBucket - startBucket + 1);
+      return bucketSpan * unitWidth;
+    }
+
+    const s = getPixelOffset(startDate);
+    const e = getPixelOffset(addDays(endDate, 1));
+    return Math.max(e - s, 24);
+  }, [getPixelOffset, viewMode, getWeekBucketIndex, unitWidth]);
+
+  // --- 2. Data Processing ---
+  const filteredData = useMemo(() => {
+    const query = searchQuery.toLowerCase();
+    return pipelines.map(pipeline => {
+      const pipeProjects = projects.filter(p => 
+        p.pipelineId === pipeline.id && 
+        (selectedPipelineIds.length === 0 || selectedPipelineIds.includes(pipeline.id)) &&
+        (p.name.toLowerCase().includes(query) || p.phases.some(ph => ph.name.toLowerCase().includes(query)))
+      );
+      return { ...pipeline, projects: pipeProjects };
+    }).filter(p => p.projects.length > 0);
+  }, [pipelines, projects, selectedPipelineIds, searchQuery]);
+
+  // Flatten layout for vertical sync
+  const layoutRows = useMemo(() => {
+    const rows: any[] = [];
+    filteredData.forEach(pipeline => {
+      pipeline.projects.forEach(project => {
+        const isCollapsed = collapsedProjects.has(project.id);
+        const phases = project.phases.filter(ph => ph.startDate && ph.endDate);
+        
+        rows.push({ type: 'project', data: project, pipelineColor: pipeline.color });
+        if (!isCollapsed) {
+          phases.forEach(phase => rows.push({ type: 'phase', data: phase, projectId: project.id }));
         }
-      }
-    }
+      });
+    });
+    return rows;
+  }, [filteredData, collapsedProjects]);
 
-    setDraggingPhase(null);
-    setDragStartDate(null);
-    setDragStartEndDate(null);
-    setPreviewDates(null);
-    lastClientXRef.current = null;
-
-    if (newStartDate) {
-      setTimeout(() => {
-        const left = getDateOffset(newStartDate);
-        ensureVisibleLeft(left);
-      }, 0);
+  // --- 3. Interaction Handlers ---
+  const handleVerticalScroll = useCallback((e: React.UIEvent<HTMLDivElement>) => {
+    const scrollTop = e.currentTarget.scrollTop;
+    if (e.currentTarget === sidebarRef.current && canvasRef.current) {
+      canvasRef.current.scrollTop = scrollTop;
+    } else if (e.currentTarget === canvasRef.current && sidebarRef.current) {
+      sidebarRef.current.scrollTop = scrollTop;
     }
-  }, [previewDates, draggingPhase, projects, updatePhase, holidays, getDateOffset]);
+  }, []);
 
-  const ensureVisibleLeft = (left: number) => {
-    const el = bodyRef.current;
-    if (!el) return;
-    const viewportLeft = el.scrollLeft;
-    const viewportRight = viewportLeft + el.clientWidth;
-    const padding = 200;
-    if (left < viewportLeft + padding) {
-      el.scrollTo({ left: Math.max(0, left - padding), behavior: 'smooth' });
-    } else if (left > viewportRight - padding) {
-      el.scrollTo({ left: left - el.clientWidth + padding * 2, behavior: 'smooth' });
-    }
+  const handleMouseDown = (e: React.MouseEvent, projectId: string, phase: Phase, type: any) => {
+    e.preventDefault();
+    if (!phase.startDate || !phase.endDate) return;
+    setDragging({
+      projectId,
+      phaseId: phase.id,
+      type,
+      originalStart: phase.startDate,
+      originalEnd: phase.endDate,
+      startX: e.clientX,
+    });
   };
 
   useEffect(() => {
-    if (draggingPhase) {
-      window.addEventListener('mousemove', handleMouseMove);
-      window.addEventListener('mouseup', handleMouseUp);
-      return () => {
-        window.removeEventListener('mousemove', handleMouseMove);
-        window.removeEventListener('mouseup', handleMouseUp);
-      };
-    }
-  }, [draggingPhase, handleMouseMove, handleMouseUp]);
+    if (!dragging) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      const deltaX = e.clientX - dragging.startX;
+      const dayWidth = viewMode === 'day' ? unitWidth : viewMode === 'week' ? unitWidth / 7 : unitWidth / 30.4;
+      const daysDiff = Math.round(deltaX / dayWidth);
+
+      const start = parseISO(dragging.originalStart);
+      const end = parseISO(dragging.originalEnd);
+
+      let newStart = start;
+      let newEnd = end;
+
+      if (dragging.type === 'move') {
+        newStart = addDays(start, daysDiff);
+        newEnd = addDays(end, daysDiff);
+      } else if (dragging.type === 'resize-left') {
+        newStart = addDays(start, daysDiff);
+        if (newStart > end) newStart = end;
+      } else {
+        newEnd = addDays(end, daysDiff);
+        if (newEnd < start) newEnd = start;
+      }
+
+      setDragPreview({
+        start: format(newStart, 'yyyy-MM-dd'),
+        end: format(newEnd, 'yyyy-MM-dd'),
+      });
+    };
+
+    const onMouseUp = () => {
+      if (dragPreview) {
+        updatePhase(dragging.projectId, dragging.phaseId, {
+          startDate: dragPreview.start,
+          endDate: dragPreview.end,
+        });
+        // cascade logic can be added here
+      }
+      setDragging(null);
+      setDragPreview(null);
+    };
+
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove);
+      window.removeEventListener('mouseup', onMouseUp);
+    };
+  }, [dragging, dragPreview, unitWidth, viewMode, updatePhase]);
+
+  // --- 4. Render Helpers ---
+  const renderHeader = () => (
+    <div className="sticky top-0 z-30 flex bg-white border-b border-gray-200" style={{ height: HEADER_HEIGHT, width: totalWidth }}>
+      {timeUnits.map((unit, i) => {
+        const isCurrent = viewMode === 'day' 
+          ? isSameDay(unit, today)
+          : viewMode === 'week'
+          ? isWithinInterval(today, { start: unit, end: addDays(unit, 6) })
+          : unit.getMonth() === today.getMonth() && unit.getFullYear() === today.getFullYear();
+
+        return (
+          <div 
+            key={i} 
+            className={`absolute top-0 bottom-0 flex flex-col items-center justify-center border-r border-gray-100 ${isCurrent ? 'bg-blue-50/50' : ''}`}
+            style={{ left: i * unitWidth, width: unitWidth }}
+          >
+            <span className={`text-[11px] font-bold ${isCurrent ? 'text-blue-600' : 'text-gray-500'}`}>
+              {viewMode === 'day'
+                ? format(unit, 'MM/dd')
+                : viewMode === 'week'
+                ? `${format(unit, 'MM/dd')}-${format(addDays(unit, 6), 'MM/dd')}`
+                : format(unit, 'yyyy/MM')}
+            </span>
+            <span className="text-[10px] text-gray-400 mt-0.5">
+              {viewMode === 'day' ? format(unit, 'EEE', { locale: zhCN }) : format(unit, 'MM/dd')}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+
+  const renderCanvasContent = () => {
+    let currentTop = 0;
+    const positions = new Map<string, { top: number; left: number; width: number }>();
+
+    const content = layoutRows.map((row, idx) => {
+      const top = currentTop;
+      const height = row.type === 'project' ? ROW_PROJECT_HEIGHT : ROW_PHASE_HEIGHT;
+      currentTop += height;
+
+      if (row.type === 'project') {
+        return <div key={`p-${row.data.id}`} className="absolute left-0 right-0 border-b border-gray-50 bg-gray-50/30" style={{ top, height }} />;
+      }
+
+      const phase = row.data;
+      const isDragging = dragging?.phaseId === phase.id;
+      const displayStart = isDragging && dragPreview ? dragPreview.start : phase.startDate;
+      const displayEnd = isDragging && dragPreview ? dragPreview.end : phase.endDate;
+      
+      const left = getPixelOffset(displayStart);
+      const width = getPhaseWidth(displayStart, displayEnd);
+      const weekStartBucket = viewMode === 'week' ? getWeekBucketIndex(parseISO(displayStart)) : null;
+      const weekEndBucket = viewMode === 'week' ? getWeekBucketIndex(parseISO(displayEnd)) : null;
+      positions.set(phase.id, { top, left, width });
+
+      return (
+        <div key={`ph-${phase.id}`} className="absolute left-0 right-0 border-b border-gray-50 group" style={{ top, height }}>
+          <div 
+            className={`absolute top-1.5 bottom-1.5 rounded shadow-sm flex items-center px-2 text-[10px] text-white cursor-move z-10 transition-all ${isDragging ? 'ring-2 ring-yellow-400 z-20 scale-[1.02] shadow-lg' : 'hover:shadow-md'}`}
+            style={{ left, width, backgroundColor: STATUS_COLORS[phase.status || 'not_started'] }}
+            onMouseDown={e => handleMouseDown(e, row.projectId, phase, 'move')}
+          >
+            <div className="absolute left-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/30" onMouseDown={e => { e.stopPropagation(); handleMouseDown(e, row.projectId, phase, 'resize-left'); }} />
+            <span className="truncate select-none font-medium">{phase.name}</span>
+            {viewMode === 'week' && weekStartBucket !== null && weekEndBucket !== null && (
+              <span className="ml-2 text-[9px] text-white/80 whitespace-nowrap">
+                W{weekStartBucket + 1}-W{weekEndBucket + 1}
+              </span>
+            )}
+            <div className="absolute right-0 top-0 bottom-0 w-1.5 cursor-ew-resize hover:bg-white/30" onMouseDown={e => { e.stopPropagation(); handleMouseDown(e, row.projectId, phase, 'resize-right'); }} />
+          </div>
+        </div>
+      );
+    });
+
+    return { content, positions, totalHeight: currentTop };
+  };
+
+  const { content: canvasItems, positions: phasePositions, totalHeight } = renderCanvasContent();
+
+  const renderDependencies = () => (
+    <svg className="absolute inset-0 pointer-events-none overflow-visible z-0">
+      {projects.map(project => 
+        project.phases.map(phase => {
+          if (!phase.dependencies || phase.dependencies.length === 0) return null;
+          const targetPos = phasePositions.get(phase.id);
+          if (!targetPos) return null;
+
+          return phase.dependencies.map(dep => {
+            const sourcePos = phasePositions.get(dep.phaseId);
+            if (!sourcePos) return null;
+
+            const startX = sourcePos.left + sourcePos.width;
+            const startY = sourcePos.top + ROW_PHASE_HEIGHT / 2;
+            const endX = targetPos.left;
+            const endY = targetPos.top + ROW_PHASE_HEIGHT / 2;
+
+            return (
+              <path
+                key={`${dep.phaseId}-${phase.id}`}
+                d={`M ${startX} ${startY} C ${startX + 24} ${startY}, ${endX - 24} ${endY}, ${endX} ${endY}`}
+                fill="none"
+                stroke="#cbd5e1"
+                strokeWidth="1.5"
+                strokeDasharray={dep.type === 'FS_PERCENT' ? '4,2' : 'none'}
+              />
+            );
+          });
+        })
+      )}
+    </svg>
+  );
 
   return (
-    <div className="flex flex-col h-full bg-gray-100">
-      {/* Header */}
-      <header className="flex-shrink-0 bg-white border-b border-gray-200 px-4 py-3">
-        <div className="flex items-center gap-4">
-          <h1 className="text-lg font-semibold text-gray-800">时间轴</h1>
-
-          {/* View Mode Toggle */}
-          <div className="flex bg-gray-100 rounded p-0.5">
-            {(['day', 'week', 'month'] as ViewMode[]).map((mode) => (
-              <button
-                key={mode}
-                onClick={() => setViewMode(mode)}
-                className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                  viewMode === mode ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-600 hover:text-gray-800'
-                }`}
-              >
-                {mode === 'day' ? '日' : mode === 'week' ? '周' : '月'}
-              </button>
-            ))}
-          </div>
-
-          {/* Zoom Controls */}
-          <button onClick={() => setZoom((z) => Math.max(0.5, z - 0.25))} className="p-1.5 hover:bg-gray-100 rounded">
-            <ZoomOut size={18} className="text-gray-600" />
-          </button>
-          <span className="text-xs text-gray-500 w-12 text-center">{Math.round(zoom * 100)}%</span>
-          <button onClick={() => setZoom((z) => Math.min(2, z + 0.25))} className="p-1.5 hover:bg-gray-100 rounded">
-            <ZoomIn size={18} className="text-gray-600" />
-          </button>
-
-          <div className="flex-1" />
-
-          {/* Search */}
-          <div className="relative">
-            <Search size={16} className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
-            <input
-              type="text"
-              placeholder="搜索项目/环节..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-56 h-8 pl-9 pr-3 rounded border border-gray-300 text-sm focus:outline-none focus:border-blue-500"
-            />
-          </div>
-
-          {/* Export */}
-          <button onClick={() => setShowExportModal(true)} className="px-3 py-1.5 bg-white border border-gray-300 rounded text-sm hover:bg-gray-50">
-            <Download size={14} className="inline mr-1" />
-            导出
-          </button>
-
-          {/* New Project */}
-          <button className="px-3 py-1.5 bg-blue-600 text-white rounded text-sm hover:bg-blue-700">
-            <Plus size={14} className="inline mr-1" />
-            新建项目
-          </button>
+    <div className="flex flex-col h-full bg-white font-sans text-slate-900">
+      {/* 1. Enhanced Toolbar */}
+      <header className="flex-shrink-0 h-16 border-b border-slate-200 flex items-center px-6 gap-6 bg-white z-40 shadow-sm">
+        <div className="flex items-center gap-3">
+          <div className="p-2 bg-blue-600 rounded-lg text-white"><Calendar size={20}/></div>
+          <h1 className="font-extrabold text-lg tracking-tight">Timeline <span className="text-blue-600">Pro</span></h1>
         </div>
-
-        {/* Filter Bar */}
-        <div className="flex items-center gap-4 mt-3">
-          <span className="text-sm text-gray-600">管线:</span>
-          <div className="flex gap-1">
-            {pipelines.map((pipeline) => {
-              const isSelected = selectedPipelineIds.includes(pipeline.id);
-              return (
-                <button
-                  key={pipeline.id}
-                  onClick={() => {
-                    setSelectedPipelines(
-                      isSelected ? selectedPipelineIds.filter((id) => id !== pipeline.id) : [...selectedPipelineIds, pipeline.id]
-                    );
-                  }}
-                  className={`px-2 py-1 rounded text-xs font-medium transition-colors ${
-                    isSelected ? 'text-white' : 'bg-gray-100 text-gray-600 hover:text-gray-800'
-                  }`}
-                  style={isSelected ? { backgroundColor: pipeline.color } : undefined}
-                >
-                  {pipeline.name}
-                </button>
-              );
-            })}
-            <button
-              onClick={() => setSelectedPipelines([])}
-              className="px-2 py-1 rounded text-xs text-gray-400 hover:text-gray-600"
+        
+        <nav className="flex bg-slate-100 p-1 rounded-xl">
+          {(['day', 'week', 'month'] as ViewMode[]).map(m => (
+            <button 
+              key={m} 
+              onClick={() => setViewMode(m)}
+              className={`px-5 py-1.5 text-xs font-bold rounded-lg transition-all ${viewMode === m ? 'bg-white shadow-md text-blue-600' : 'text-slate-500 hover:text-slate-700'}`}
             >
-              全部
+              {m === 'day' ? '日' : m === 'week' ? '周' : '月'}
             </button>
-          </div>
+          ))}
+        </nav>
 
-          <label className="flex items-center gap-2 text-sm text-gray-600">
-            <input
-              type="checkbox"
-              checked={showOnlyWithDependencies}
-              onChange={(e) => setShowOnlyWithDependencies(e.target.checked)}
-              className="w-4 h-4 rounded border-gray-300 text-blue-600"
-            />
-            只看有依赖的项目
-          </label>
-
-          <div className="flex-1" />
-
-          <span className="text-xs text-gray-500">
-            共 {filteredProjects.length} 个项目，{filteredProjects.filter((p) => p.dependencies.length > 0).length} 个有依赖
-          </span>
+        <div className="flex items-center gap-2 border-l border-slate-200 pl-6">
+          <button onClick={() => setZoom(z => Math.max(0.5, z - 0.1))} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors"><ZoomOut size={18}/></button>
+          <span className="text-[13px] font-bold text-slate-600 w-12 text-center">{Math.round(zoom * 100)}%</span>
+          <button onClick={() => setZoom(z => Math.min(2, z + 0.1))} className="p-2 hover:bg-slate-100 rounded-lg text-slate-400 hover:text-slate-600 transition-colors"><ZoomIn size={18}/></button>
         </div>
+
+        <div className="flex-1" />
+        
+        <div className="relative group">
+          <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-slate-400 group-focus-within:text-blue-500 transition-colors" size={16}/>
+          <input 
+            className="w-72 pl-10 pr-4 py-2 bg-slate-50 border border-slate-200 rounded-xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-500/10 focus:border-blue-500 transition-all"
+            placeholder="搜索项目名称或环节..."
+            value={searchQuery}
+            onChange={e => setSearchQuery(e.target.value)}
+          />
+        </div>
+        
+        <button 
+          onClick={() => setShowExportModal(true)}
+          className="flex items-center gap-2 px-5 py-2.5 bg-slate-900 text-white rounded-xl text-sm font-bold hover:bg-slate-800 transition-all active:scale-95 shadow-lg shadow-slate-200"
+        >
+          <Download size={16}/> 导出报告
+        </button>
       </header>
 
-      {/* Main Content */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Project List */}
-        <div className="w-72 flex-shrink-0 bg-white border-r border-gray-200 flex flex-col">
-          <div className="px-4 py-3 bg-gray-50 border-b border-gray-200">
-            <span className="text-xs font-medium text-gray-500 uppercase">项目列表</span>
+        {/* 2. Synchronized Sidebar */}
+        <aside className="flex-shrink-0 border-r border-slate-200 flex flex-col bg-white z-20" style={{ width: SIDEBAR_WIDTH }}>
+          <div className="h-[64px] flex-shrink-0 border-b border-slate-200 flex items-center px-5 bg-slate-50/50 font-black text-[10px] text-slate-400 uppercase tracking-[0.2em]">
+            <Filter size={12} className="mr-2"/> Navigation
           </div>
-          <div className="flex-1 overflow-y-auto" ref={listRef} onScroll={handleListScroll}>
-            {pipelines.map((pipeline) => {
-              const pipelineProjects = groupedProjects[pipeline.id] || [];
-              const isExpanded = expandedPipelines.includes(pipeline.id);
-              return (
-                <div key={pipeline.id}>
-                  <button
-                    onClick={() => togglePipeline(pipeline.id)}
-                    className="w-full px-4 py-2 flex items-center gap-2 hover:bg-gray-50 transition-colors"
-                  >
-                    {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                    <span className="w-2.5 h-2.5 rounded-full" style={{ backgroundColor: pipeline.color }} />
-                    <span className="text-sm font-medium text-gray-800 flex-1 text-left">{pipeline.name}</span>
-                    <span className="text-xs text-gray-400">{pipelineProjects.length}</span>
-                  </button>
-
-                  {isExpanded &&
-                    pipelineProjects.map((project) => {
-                      const isCollapsed = collapsedProjects.has(project.id);
-                      const phaseCount = project.phases.filter(p => p.startDate && p.endDate).length;
-                      const phaseHeight = phaseCount > 0 ? phaseCount * 32 : 0;
-                      const rowHeight = isCollapsed ? 48 : 48 + phaseHeight;
-                      return (
-                        <div 
-                          key={project.id} 
-                          className="border-l-2 border-transparent hover:border-blue-300 overflow-hidden"
-                          style={{ height: rowHeight }}
-                        >
-                          <div 
-                            className="pl-8 pr-4 hover:bg-gray-50 cursor-pointer flex items-center gap-2"
-                            style={{ height: 48 }}
-                            onClick={() => toggleProject(project.id)}
-                          >
-                            {isCollapsed ? (
-                              <ChevronRight size={12} className="text-gray-400 flex-shrink-0" />
-                            ) : (
-                              <ChevronDown size={12} className="text-gray-400 flex-shrink-0" />
-                            )}
-                            <div className="flex items-center gap-2 flex-1 min-w-0">
-                              <span className="text-sm text-gray-800 truncate">{project.name}</span>
-                              <span
-                                className="w-1.5 h-1.5 rounded-full flex-shrink-0"
-                                style={{ backgroundColor: levelColors[project.level] }}
-                                title={project.level}
-                              />
-                            </div>
-                            <span className="text-xs text-gray-400 flex-shrink-0">{phaseCount}环节</span>
-                          </div>
-                          {!isCollapsed && phaseCount > 0 && (
-                            <div className="pl-10 pr-4" style={{ height: phaseHeight }}>
-                              <div className="flex items-center gap-3 h-4">
-                                <span className="text-xs text-gray-400">{project.manager}</span>
-                                {project.dependencies.length > 0 && (
-                                  <span className="flex items-center gap-0.5 text-xs text-blue-600">
-                                    <Link2 size={10} />
-                                    {project.dependencies.length}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="h-1 bg-gray-100 rounded-full overflow-hidden">
-                                <div
-                                  className="h-full rounded-full transition-all"
-                                  style={{ width: `${project.progress || 0}%`, backgroundColor: pipeline.color }}
-                                />
-                              </div>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        {/* Timeline Canvas */}
-        <div className="flex-1 flex flex-col overflow-hidden">
-          {/* Timeline Header - synced scroll with body */}
           <div 
-            className="flex-shrink-0 bg-white border-b border-gray-200 overflow-hidden"
+            ref={sidebarRef}
+            onScroll={handleVerticalScroll}
+            className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide select-none"
           >
-            <div 
-              className="overflow-x-auto scrollbar-thin"
-              ref={headerRef}
-              onScroll={(e) => {
-                const scrollLeft = e.currentTarget.scrollLeft;
-                if (bodyRef.current) {
-                  bodyRef.current.scrollLeft = scrollLeft;
-                }
-              }}
-            >
-              <div className="relative" style={{ width: totalWidth, minHeight: 56 }}>
-                {timeUnits.map((unit, index) => (
-                  <div
-                    key={index}
-                    className={`absolute top-0 bottom-0 flex flex-col items-center justify-center border-r border-gray-200 ${
-                      isSameDay(unit, today) || (viewMode === 'week' && index === 0) ? 'bg-blue-50' : ''
-                    } ${isWeekend(unit) && viewMode === 'day' ? 'bg-gray-50' : ''}`}
-                    style={{ left: index * unitWidth, width: unitWidth }}
-                  >
-                    <span className={`text-xs ${isSameDay(unit, today) ? 'text-blue-600 font-medium' : 'text-gray-600'}`}>
-                      {viewMode === 'day'
-                        ? format(unit, 'MM/dd')
-                        : viewMode === 'week'
-                        ? `${format(unit, 'MM/dd')}~${format(addDays(unit, 6), 'MM/dd')}`
-                        : format(unit, 'yyyy年MM月')}
-                    </span>
-                    <span className="text-[10px] text-gray-400">
-                      {viewMode === 'day'
-                        ? format(unit, 'EEE', { locale: zhCN })
-                        : viewMode === 'week'
-                        ? `第${index + 1}周`
-                        : format(unit, 'M月', { locale: zhCN })}
-                    </span>
-                    {getHolidayInfo(unit) && (
-                      <span className="text-[10px] text-red-500 mt-0.5">{getHolidayInfo(unit)}</span>
-                    )}
-                  </div>
-                ))}
-              </div>
-            </div>
-          </div>
-
-          {/* Timeline Body */}
-          <div 
-            className="flex-1 overflow-auto scrollbar-thin" 
-            onScroll={handleBodyScroll}
-            ref={bodyRef}
-          >
-            <div className="relative" style={{ width: totalWidth, minHeight: '100%' }}>
-              {/* Grid Lines */}
-              {timeUnits.map((_, index) => (
-                <div
-                  key={index}
-                  className="absolute top-0 bottom-0 w-px bg-gray-200"
-                  style={{ left: index * unitWidth }}
-                />
-              ))}
-
-              {/* Today Line */}
-              <div
-                className="absolute top-0 bottom-0 w-0.5 bg-blue-500 z-10"
-                style={{ left: getDateOffset(today) }}
-              />
-
-              {/* Project Rows */}
-              {pipelines.map((pipeline) => {
-                const pipelineProjects = groupedProjects[pipeline.id] || [];
-                if (!expandedPipelines.includes(pipeline.id)) return null;
-
-                let currentTop = 0;
-                const rows: { project: Project; top: number; height: number }[] = [];
-                
-                pipelineProjects.forEach((project) => {
-                  const isCollapsed = collapsedProjects.has(project.id);
-                  const phaseCount = project.phases.filter(p => p.startDate && p.endDate).length;
-                  const phaseHeight = phaseCount > 0 ? phaseCount * 32 : 0;
-                  const rowHeight = isCollapsed ? 48 : 48 + phaseHeight;
-                  rows.push({ project, top: currentTop, height: rowHeight, isCollapsed, phaseCount });
-                  currentTop += rowHeight;
-                });
-
-                return (
-                  <div key={pipeline.id} className="relative" style={{ height: currentTop }}>
-                    {rows.map(({ project, top, height, isCollapsed, phaseCount }) => (
-                      <div 
-                        key={project.id} 
-                        className="absolute left-0 right-0 border-b border-gray-200"
-                        style={{ top, height }}
-                      >
-                        {/* Project Header */}
-                        <div className="absolute left-0 right-0 h-12 flex items-center px-3 bg-gray-50 border-b border-gray-200">
-                          <button
-                            onClick={() => toggleProject(project.id)}
-                            className="p-1 hover:bg-gray-200 rounded mr-1"
-                          >
-                            {isCollapsed ? (
-                              <ChevronRight size={14} className="text-gray-500" />
-                            ) : (
-                              <ChevronDown size={14} className="text-gray-500" />
-                            )}
-                          </button>
-                          <span className="w-2.5 h-2.5 rounded-full mr-2 flex-shrink-0" style={{ backgroundColor: pipeline.color }} />
-                          <span className="text-sm font-medium text-gray-700 truncate">{project.name}</span>
-                          <span className="ml-2 text-xs text-gray-400">{phaseCount}环节</span>
-                        </div>
-
-                        {/* Phase Bars */}
-                        {!isCollapsed && (
-                          <div className="absolute left-0 right-0 pt-12 px-2 pb-2" style={{ height: height - 48 }}>
-                            {project.phases.map((phase, phaseIndex) => {
-                              if (!phase.startDate || !phase.endDate) return null;
-                              
-                              const isDragging = draggingPhase?.phaseId === phase.id;
-                              const showPreview = isDragging && previewDates;
-                              
-                              const displayStartDate = showPreview ? previewDates.startDate : phase.startDate;
-                              const displayEndDate = showPreview ? previewDates.endDate : phase.endDate;
-                              
-                              const barLeft = getDateOffset(displayStartDate);
-                              const barWidth = getPhaseWidth(displayStartDate, displayEndDate);
-                              const barTop = phaseIndex * 32 + 4;
-                              const color = statusColors[phase.status || 'not_started'];
-                              
-                              const hasDependency = phase.dependencies && phase.dependencies.length > 0;
-                              const depType = hasDependency ? phase.dependencies[0].type : null;
-                              const depPercent = phase.dependencies?.[0]?.percentage;
-
-                              return (
-                                <div
-                                  key={phase.id}
-                                  className={`absolute h-7 rounded flex items-center text-xs text-white transition-shadow ${showPreview ? 'shadow-lg z-20 ring-2 ring-yellow-400' : 'hover:shadow-md cursor-move'}`}
-                                  style={{
-                                    left: barLeft,
-                                    width: barWidth,
-                                    top: barTop,
-                                    backgroundColor: color,
-                                    opacity: showPreview ? 0.9 : 1,
-                                  }}
-                                  title={`${phase.name}: ${displayStartDate} - ${displayEndDate}${hasDependency ? ` (依赖触发)` : ''}`}
-                                >
-                                  {/* Left resize handle */}
-                                  {!showPreview && (
-                                    <div
-                                      className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20 rounded-l"
-                                      onMouseDown={(e) => handlePhaseMouseDown(e, project.id, phase.id, 'resize-left', phase.startDate, phase.endDate)}
-                                    />
-                                  )}
-                                  
-                                  {/* Phase content - drag to move */}
-                                  <div
-                                    className="flex-1 flex items-center px-2 overflow-hidden"
-                                    onMouseDown={(e) => !showPreview && handlePhaseMouseDown(e, project.id, phase.id, 'move', phase.startDate, phase.endDate)}
-                                  >
-                                    <span className="truncate">{phase.name}</span>
-                                    {phase.isKeyNode && <span className="ml-1 text-yellow-200">★</span>}
-                                    {hasDependency && (
-                                      <span className="ml-1 text-white/70 text-[10px]">
-                                        {depType === 'FS' && '→'}
-                                        {depType === 'FS_PERCENT' && `⤳${depPercent}%`}
-                                        {depType === 'FS_OFFSET' && '→+'}
-                                        {depType === 'SS_OFFSET' && '↷+'}
-                                        {depType === 'SS_PARALLEL' && '↷'}
-                                      </span>
-                                    )}
-                                    {showPreview && <span className="ml-1 text-yellow-200 text-[10px]">[预览]</span>}
-                                  </div>
-                                  
-                                  {/* Right resize handle */}
-                                  {!showPreview && (
-                                    <div
-                                      className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-white/20 rounded-r"
-                                      onMouseDown={(e) => handlePhaseMouseDown(e, project.id, phase.id, 'resize-right', phase.startDate, phase.endDate)}
-                                    />
-                                  )}
-                                </div>
-                              );
-                            })}
-                            
-                            {/* Dependency Lines */}
-                            {project.phases.map((phase, phaseIndex) => {
-                              if (!phase.dependencies || phase.dependencies.length === 0 || phaseIndex === 0) return null;
-                              
-                              const dep = phase.dependencies[0];
-                              const sourcePhase = project.phases.find(p => p.id === dep.phaseId);
-                              if (!sourcePhase?.startDate || !sourcePhase?.endDate) return null;
-                              
-                              const sourceBarTop = project.phases.indexOf(sourcePhase) * 32 + 7.5;
-                              const targetBarTop = phaseIndex * 32 + 7.5;
-                              const sourceEndLeft = getDateOffset(sourcePhase.endDate) + 2;
-                              const targetStartLeft = getDateOffset(phase.startDate || sourcePhase.endDate);
-                              
-                              const lineColor = '#94a3b8';
-                              
-                              return (
-                                <svg
-                                  key={`dep-${phase.id}`}
-                                  className="absolute pointer-events-none"
-                                  style={{
-                                    left: 0,
-                                    top: 0,
-                                    width: '100%',
-                                    height: '100%',
-                                    overflow: 'visible',
-                                  }}
-                                >
-                                  <path
-                                    d={`M ${sourceEndLeft} ${sourceBarTop} 
-                                        C ${sourceEndLeft + 20} ${sourceBarTop},
-                                          ${targetStartLeft - 20} ${targetBarTop},
-                                          ${targetStartLeft} ${targetBarTop}`}
-                                    fill="none"
-                                    stroke={lineColor}
-                                    strokeWidth="1.5"
-                                    strokeDasharray={dep.type === 'FS_PERCENT' || dep.type === 'SS_PARALLEL' ? '4,2' : 'none'}
-                                  />
-                                  <circle
-                                    cx={targetStartLeft}
-                                    cy={targetBarTop}
-                                    r="3"
-                                    fill={lineColor}
-                                  />
-                                </svg>
-                              );
-                            })}
-                          </div>
-                        )}
+            {layoutRows.map((row, idx) => (
+              <div 
+                key={idx} 
+                className={`flex items-center px-4 border-b border-slate-100 transition-colors ${row.type === 'project' ? 'h-[44px] bg-slate-50/30' : 'h-[36px] hover:bg-blue-50/30'}`}
+              >
+                {row.type === 'project' ? (
+                  <>
+                    <button 
+                      onClick={() => setCollapsedProjects(prev => {
+                        const next = new Set(prev);
+                        if (next.has(row.data.id)) next.delete(row.data.id); else next.add(row.data.id);
+                        return next;
+                      })}
+                      className="p-1 hover:bg-slate-200 rounded transition-colors mr-2"
+                    >
+                      <div className={`transition-transform duration-200 ${collapsedProjects.has(row.data.id) ? '' : 'rotate-90'}`}>
+                        <ChevronRight size={14} className="text-slate-400" />
                       </div>
-                    ))}
-                  </div>
-                );
-              })}
+                    </button>
+                    <span className="w-2 h-2 rounded-full mr-3 shadow-sm" style={{ backgroundColor: row.pipelineColor }} />
+                    <span className="text-sm font-bold text-slate-700 truncate">{row.data.name}</span>
+                  </>
+                ) : (
+                  <>
+                    <div className="w-8 flex justify-center"><div className="w-0.5 h-4 bg-slate-200" /></div>
+                    <span className="text-[13px] text-slate-500 truncate font-medium italic">{row.data.name}</span>
+                  </>
+                )}
+              </div>
+            ))}
+          </div>
+        </aside>
+
+        {/* 3. Reconstructed Canvas */}
+        <main 
+          className="flex-1 overflow-auto relative bg-[#f8fafc] scroll-smooth" 
+          ref={canvasRef}
+          onScroll={handleVerticalScroll}
+        >
+          <div style={{ width: totalWidth, minHeight: '100%', position: 'relative' }}>
+            {renderHeader()}
+            
+            <div className="relative" style={{ height: totalHeight }}>
+              {/* Background Grid */}
+              <div className="absolute inset-0 pointer-events-none">
+                {timeUnits.map((_, i) => (
+                  <div key={i} className="absolute top-0 bottom-0 border-r border-slate-200/60" style={{ left: i * unitWidth, width: unitWidth }} />
+                ))}
+                <div className="absolute top-0 bottom-0 w-0.5 bg-blue-500 z-10 shadow-[0_0_8px_rgba(59,130,246,0.5)]" style={{ left: getPixelOffset(today) }} />
+              </div>
+
+              {renderDependencies()}
+              {canvasItems}
             </div>
           </div>
-        </div>
+        </main>
       </div>
 
-      {/* Export Modal */}
       {showExportModal && <ExportModal onClose={() => setShowExportModal(false)} />}
     </div>
   );
