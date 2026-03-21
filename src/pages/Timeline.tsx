@@ -102,12 +102,16 @@ export default function Timeline() {
   const unitWidth = useMemo(() => columnWidths[viewMode] * zoom, [columnWidths, viewMode, zoom]);
   const totalWidth = timeUnits.length * unitWidth;
 
+  const normalizeWeekDate = useCallback((dateInput: Date) => {
+    const normalizedDate = startOfDay(dateInput);
+    return normalizedDate.getDay() === 0 ? addDays(normalizedDate, 1) : normalizedDate;
+  }, []);
+
   const getWeekBucketIndex = useCallback((dateInput: Date) => {
     const rangeStart = timeUnits[0];
-    const normalizedDate = startOfDay(dateInput);
-    const weekAlignedDate = normalizedDate.getDay() === 0 ? addDays(normalizedDate, 1) : normalizedDate;
+    const weekAlignedDate = normalizeWeekDate(dateInput);
     return Math.floor(differenceInCalendarDays(weekAlignedDate, rangeStart) / 7);
-  }, [timeUnits]);
+  }, [timeUnits, normalizeWeekDate]);
 
   const getPixelOffset = useCallback((dateInput: string | Date | undefined | null) => {
     if (!dateInput || timeUnits.length === 0) return 0;
@@ -124,7 +128,11 @@ export default function Timeline() {
       const weekIndex = getWeekBucketIndex(date);
       if (weekIndex < 0) return 0;
       if (weekIndex >= timeUnits.length) return totalWidth;
-      return weekIndex * unitWidth;
+      const weekAlignedDate = normalizeWeekDate(date);
+      const weekStart = addDays(timeUnits[0], weekIndex * 7);
+      const daysIntoWeek = differenceInCalendarDays(weekAlignedDate, weekStart);
+      const progress = Math.max(0, Math.min(1, daysIntoWeek / 7));
+      return (weekIndex + progress) * unitWidth;
     }
 
     let unitIndex = -1;
@@ -149,7 +157,7 @@ export default function Timeline() {
     const progress = dayOffset / unitTotalDays;
 
     return (unitIndex + progress) * unitWidth;
-  }, [viewMode, unitWidth, timeUnits, totalWidth, getWeekBucketIndex]);
+  }, [viewMode, unitWidth, timeUnits, totalWidth, getWeekBucketIndex, normalizeWeekDate]);
 
   const getPhaseWidth = useCallback((start: string, end: string) => {
     const startDate = parseISO(start);
@@ -157,16 +165,15 @@ export default function Timeline() {
     if (isNaN(startDate.getTime()) || isNaN(endDate.getTime())) return 24;
 
     if (viewMode === 'week') {
-      const startBucket = getWeekBucketIndex(startDate);
-      const endBucket = getWeekBucketIndex(endDate);
-      const bucketSpan = Math.max(1, endBucket - startBucket + 1);
-      return bucketSpan * unitWidth;
+      const s = getPixelOffset(startDate);
+      const e = getPixelOffset(addDays(endDate, 1));
+      return Math.max(e - s, Math.max(12, unitWidth / 7));
     }
 
     const s = getPixelOffset(startDate);
     const e = getPixelOffset(addDays(endDate, 1));
     return Math.max(e - s, 24);
-  }, [getPixelOffset, viewMode, getWeekBucketIndex, unitWidth]);
+  }, [getPixelOffset, viewMode, unitWidth]);
 
   // --- 2. Data Processing ---
   const filteredData = useMemo(() => {
